@@ -1,199 +1,214 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { z } from "zod";
+
 import { Button } from "@/components/ui/button";
 import {
-	Dialog,
-	DialogClose,
-	DialogContent,
-	DialogDescription,
-	DialogFooter,
-	DialogHeader,
-	DialogTitle,
+  DialogClose,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
 } from "@/components/ui/dialog";
-import { useAddModToInstallation } from "@/hooks/use-add-mod-to-installation";
-import { useAppFolder } from "@/hooks/use-app-folder";
-import { installedModsQueryKey } from "@/hooks/use-installed-mods";
-import { modUpdatesQueryKey } from "@/hooks/use-mod-updates";
-import type { ModInfo, ProgressPayload } from "@/lib/types";
-import { buildInstallationPath, makeStringFolderSafe } from "@/lib/utils";
-import { useDialogStore } from "@/stores/dialogs";
-import { useInstallations } from "@/stores/installations";
-import { useSettingsStore } from "@/stores/settings";
+import { Progress, ProgressTrack, ProgressIndicator } from "@/components/ui/progress";
+import { rootDialogHandle } from "@/handles";
+import { installedVersionsQueryKey } from "@/hooks/use-installed-versions";
+import { makeStringFolderSafe } from "@/lib/utils";
+import { useInstallations, type Installation } from "@/stores/installations";
 
 const installationSchema = z.object({
-	mods: z.array(
-		z.object({
-			id: z.string(),
-			version: z.string(),
-		}),
-	),
-	name: z.string().min(2).max(100),
-	version: z.string().min(2).max(100),
+  mods: z.union([
+    z.array(
+      z.object({
+        id: z.string(),
+        version: z.string(),
+      }),
+    ),
+    z.string(),
+  ]),
+  name: z.string().min(2).max(100),
+  version: z.string().min(2).max(100),
+  startParams: z.string().optional().default(""),
 });
 
-export function ImportInstallationDialog({ open }: { open: boolean }) {
-	const [newInstallation, setNewInstallation] = useState<string>("");
-	const { addInstallation, installations } = useInstallations();
-	const { closeDialog } = useDialogStore();
-	const listenRef = useRef<() => void>(null);
-	const queryClient = useQueryClient();
-	const { installationsParent, installationsSubdir } = useSettingsStore();
-	const { appFolder } = useAppFolder();
+type BackendInstallationResult = {
+  id: number;
+  name: string;
+  version: string;
+  startParams: string;
+  path: string;
+  size_bytes: number;
+  size_display: string;
+  favorite: boolean;
+  modpack_slug: string | null;
+  modpack_version: string | null;
+};
 
-	const { mutate: addModToInstallation, isPending } = useAddModToInstallation({
-		onError: (error, variables) => {
-			toast.error(
-				`Error adding ${variables.mod.mod.name} to ${variables.installation.name}: ${error.message}`,
-				{
-					id: `add-mod-${variables.mod.mod.modid}-${variables.installation.id}`,
-				},
-			);
-			listenRef.current?.();
-		},
-		onMutate: async (variables) => {
-			toast.loading(
-				`Adding ${variables.mod.mod.name} to ${variables.installation.name}...`,
-				{
-					id: `add-mod-${variables.mod.mod.modid}-${variables.installation.id}`,
-				},
-			);
-			listenRef.current = await listen<ProgressPayload>(
-				variables.emitevent,
-				(event) => {
-					const { phase, percent } = event.payload;
-					if (phase === "download") {
-						toast.loading(
-							`Downloading ${variables.mod.mod.name} to ${variables.installation.name}... ${percent?.toFixed(0)}%`,
-							{
-								id: `add-mod-${variables.mod.mod.modid}-${variables.installation.id}`,
-							},
-						);
-					}
-				},
-			);
-		},
-		onSuccess: async (_, variables) => {
-			listenRef.current?.();
-			toast.success(
-				`Successfully added ${variables.mod.mod.name} to ${variables.installation.name}`,
-				{
-					id: `add-mod-${variables.mod.mod.modid}-${variables.installation.id}`,
-				},
-			);
-			await queryClient.invalidateQueries({
-				queryKey: installedModsQueryKey(variables.installation.path),
-			});
-			await queryClient.invalidateQueries({
-				queryKey: modUpdatesQueryKey(variables.installation.id),
-			});
-			closeDialog();
-		},
-	});
+type ImportProgress = {
+  current: number;
+  total: number;
+  modid: string;
+  version: string;
+};
 
-	const { mutateAsync: initializeGame, isPending: initializePending } =
-		useMutation({
-			mutationFn: (path: string) =>
-				invoke("initialize_game", { path }) as Promise<string>,
-			onError: (error, path) => {
-				toast.error(`Error initializing game: ${error}`, {
-					id: `initialize-game-${path}`,
-				});
-			},
-			onMutate: (path) => {
-				toast.loading(`Initializing game...`, {
-					id: `initialize-game-${path}`,
-				});
-			},
-			onSuccess: async (_, path) => {
-				toast.success(`Game initialized`, {
-					id: `initialize-game-${path}`,
-				});
+export function ImportInstallationDialog() {
+  const queryClient = useQueryClient();
+  const [newInstallation, setNewInstallation] = useState<string>("");
+  const [progress, setProgress] = useState<ImportProgress | null>(null);
+  const { addInstallation, loadInstallations } = useInstallations();
+  const listenRef = useRef<UnlistenFn>(null);
 
-				const installation = installationSchema.safeParse(
-					JSON.parse(
-						newInstallation.replace(/[“”]/g, '"').replace(/[‘’]/g, "'"),
-					),
-				);
-				if (installation.success) {
-					const installationId = Date.now();
-					const newInstallation = {
-						favorite: false,
-						icon: "",
-						id: installationId,
-						index: installations.length,
-						lastTimePlayed: 0,
-						name: installation.data.name,
-						path,
-						startParams: "",
-						totalTimePlayed: 0,
-						version: installation.data.version,
-					};
-					addInstallation(newInstallation);
+  const { mutate: doImport, isPending } = useMutation({
+    mutationFn: async (input: {
+      name: string;
+      version: string;
+      startParams: string;
+      mods: string;
+      emitevent: string;
+    }) => {
+      const safeName = makeStringFolderSafe(input.name);
+      const result = (await invoke("import_installation", {
+        emitevent: input.emitevent,
+        mods: input.mods,
+        name: input.name,
+        safeName,
+        startParams: input.startParams,
+        version: input.version,
+      })) as BackendInstallationResult;
+      return result;
+    },
+    onError: (error: Error) => {
+      listenRef.current?.();
+      setProgress(null);
+      toast.error(`Import failed: ${error.message}`, {
+        id: "import-installation",
+      });
+    },
+    onMutate: async (input) => {
+      toast.loading(`Importing "${input.name}"...`, {
+        id: "import-installation",
+      });
 
-					for (const mod of installation.data.mods) {
-						const modInfo = (await invoke("fetch_mod_info", {
-							modid: mod.id,
-						})) as ModInfo | null;
-						if (modInfo) {
-							addModToInstallation({
-								emitevent: `import-installation-${installationId}-${mod.id}`,
-								installation: newInstallation,
-								mod: modInfo,
-								version: mod.version,
-							});
-						}
-					}
-				}
-			},
-		});
+      // Start listening for per-mod download progress
+      listenRef.current = await listen<{
+        phase: string;
+        current: number;
+        total: number;
+        modid: string;
+        version: string;
+      }>(input.emitevent, (event) => {
+        if (event.payload.phase === "downloading") {
+          setProgress({
+            current: event.payload.current,
+            modid: event.payload.modid,
+            total: event.payload.total,
+            version: event.payload.version,
+          });
+        }
+      });
+    },
+    onSuccess: async (result) => {
+      listenRef.current?.();
+      setProgress(null);
 
-	const handleImportInstallation = async () => {
-		const installation = installationSchema.safeParse(
-			JSON.parse(newInstallation.replace(/[""]/g, '"').replace(/['']/g, "'")),
-		);
-		if (installation.success && appFolder) {
-			await initializeGame(
-				buildInstallationPath(
-					installationsParent ?? appFolder,
-					makeStringFolderSafe(installation.data.name),
-					installationsSubdir,
-				),
-			);
-		}
-	};
+      const installation: Installation = {
+        favorite: false,
+        icon: "",
+        id: result.id,
+        index: 0,
+        lastTimePlayed: 0,
+        name: result.name,
+        path: result.path,
+        sizeBytes: result.size_bytes,
+        sizeDisplay: result.size_display,
+        startParams: result.startParams,
+        totalTimePlayed: 0,
+        version: result.version,
+        modpackSlug: result.modpack_slug ?? null,
+        modpackVersion: result.modpack_version ?? null,
+      };
 
-	return (
-		<Dialog
-			onOpenChange={() => !isPending && !initializePending && closeDialog()}
-			open={open}
-		>
-			<DialogClose />
-			<DialogContent>
-				<DialogHeader>
-					<DialogTitle>Import a new installation</DialogTitle>
-					<DialogDescription>
-						Enter the JSON configuration of the installation you want to import.
-					</DialogDescription>
-				</DialogHeader>
-				<textarea
-					className="w-full h-48 p-2 border rounded resize-none"
-					onChange={(e) => setNewInstallation(e.target.value)}
-					placeholder="Paste installation JSON here..."
-					value={newInstallation}
-				/>
-				<DialogFooter>
-					<Button
-						disabled={isPending || newInstallation.trim() === ""}
-						onClick={() => handleImportInstallation()}
-					>
-						{isPending ? "Importing..." : "Import"}
-					</Button>
-				</DialogFooter>
-			</DialogContent>
-		</Dialog>
-	);
+      addInstallation(installation);
+      await loadInstallations();
+      void queryClient.invalidateQueries({ queryKey: installedVersionsQueryKey() });
+
+      toast.success(`Successfully imported "${result.name}"`, {
+        id: "import-installation",
+      });
+
+      rootDialogHandle.close();
+    },
+  });
+
+  const handleImportInstallation = () => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(
+        newInstallation.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'"),
+      );
+    } catch {
+      toast.error("Invalid JSON");
+      return;
+    }
+
+    const result = installationSchema.safeParse(parsed);
+    if (!result.success) {
+      toast.error("Invalid installation JSON");
+      return;
+    }
+
+    const { name, version, startParams, mods } = result.data;
+
+    const modsString =
+      typeof mods === "string" ? mods : mods.map((m) => `${m.id}@${m.version}`).join(",");
+
+    const emitevent = `import-installation-${Date.now()}`;
+
+    doImport({ emitevent, mods: modsString, name, startParams, version });
+  };
+
+  return (
+    <>
+      <DialogClose />
+      <DialogHeader>
+        <DialogTitle>Import a new installation</DialogTitle>
+        <DialogDescription>
+          Enter the JSON configuration of the installation you want to import.
+        </DialogDescription>
+      </DialogHeader>
+      <textarea
+        aria-label="Installation JSON"
+        className="h-48 w-full resize-none rounded border p-2"
+        disabled={isPending}
+        onChange={(e) => setNewInstallation(e.target.value)}
+        placeholder="Paste installation JSON here..."
+        value={newInstallation}
+      />
+      {progress && (
+        <div className="space-y-1">
+          <p className="text-muted-foreground text-sm">
+            Downloading mod {progress.current} of {progress.total}:{" "}
+            <span className="text-foreground font-medium">{progress.modid}</span>
+            <span className="text-muted-foreground">@{progress.version}</span>
+          </p>
+          <Progress value={Math.round((progress.current / progress.total) * 100)}>
+            <ProgressTrack>
+              <ProgressIndicator />
+            </ProgressTrack>
+          </Progress>
+        </div>
+      )}
+      <DialogFooter>
+        <Button
+          disabled={isPending || newInstallation.trim() === ""}
+          onClick={handleImportInstallation}
+        >
+          {isPending ? "Importing..." : "Import"}
+        </Button>
+      </DialogFooter>
+    </>
+  );
 }

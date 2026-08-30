@@ -1,41 +1,40 @@
-import { type UseQueryOptions, useQuery } from "@tanstack/react-query";
+import { type UseQueryOptions, keepPreviousData, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 
 export type ModUpdatesResponse = {
-	statuscode: string;
-	updates: {
-		[key: string]: ModUpdate;
-	};
+  statuscode: string;
+  updates: {
+    [key: string]: ModUpdate;
+  };
 };
 
 export type ModUpdate = {
-	releaseid: number;
-	mainfile: string;
-	filename: string;
-	fileid: number;
-	downloads: number;
-	tags: string[];
-	modidstr: string;
-	modversion: string;
-	created: string;
+  releaseid: number;
+  mainfile: string;
+  filename: string;
+  fileid: number;
+  downloads: number;
+  tags: string[];
+  modidstr: string;
+  modversion: string;
+  created: string;
 };
 
-export const modUpdatesQueryKey = (installationId: number, params?: string) =>
-	params !== undefined
-		? ["modUpdates", installationId, params]
-		: ["modUpdates", installationId];
+export const modUpdatesQueryKey = (path: string, params?: string) =>
+  params !== undefined ? ["modUpdates", path, params] : ["modUpdates", path];
 
 export const useModUpdates = (
-	{ installationId, params }: { installationId: number; params: string },
-	props?: Omit<
-		UseQueryOptions<ModUpdatesResponse, Error, ModUpdatesResponse>,
-		"queryKey" | "queryFn"
-	>,
+  { path, params }: { path: string; params: string },
+  props?: Omit<
+    UseQueryOptions<ModUpdatesResponse, Error, ModUpdatesResponse>,
+    "queryKey" | "queryFn"
+  >,
 ) => {
-	return useQuery({
-		queryFn: () =>
-			invoke("get_mod_updates", { params }) as Promise<ModUpdatesResponse>,
-		queryKey: modUpdatesQueryKey(installationId, params),
-		...props,
-	});
+  return useQuery({
+    queryFn: () => invoke("get_mod_updates", { params }) as Promise<ModUpdatesResponse>,
+    queryKey: modUpdatesQueryKey(path, params),
+    staleTime: Infinity,
+    placeholderData: keepPreviousData,
+    ...props,
+  });
 };

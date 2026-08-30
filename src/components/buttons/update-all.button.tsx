@@ -2,123 +2,127 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
 import { toast } from "sonner";
+
+import type { OutputMod } from "@/components/pages/mods-browser";
 import { Button } from "@/components/ui/button";
 import { useAddModUpdateToInstallation } from "@/hooks/use-add-mod-update-to-installation";
 import { installedModsQueryKey } from "@/hooks/use-installed-mods";
 import {
-	type ModUpdate,
-	type ModUpdatesResponse,
-	modUpdatesQueryKey,
+  type ModUpdate,
+  type ModUpdatesResponse,
+  modUpdatesQueryKey,
 } from "@/hooks/use-mod-updates";
-import type { OutputMod } from "@/routes/install-mods/$id";
-import type { Installation } from "@/stores/installations";
+import { hashPath } from "@/lib/utils";
 
 export const UpdateAllButton = ({
-	installation,
-	updates,
-	installedMods,
+  modsDirectory,
+  updates,
+  installedMods,
 }: {
-	installation: Installation;
-	updates: ModUpdatesResponse;
-	installedMods: OutputMod[];
+  modsDirectory: string;
+  updates: ModUpdatesResponse;
+  installedMods: OutputMod[];
 }) => {
-	const emitevent = `mod-updates-${installation?.id}-progress`;
-	const queryClient = useQueryClient();
-	const [wantsToUpdate, setWantsToUpdate] = useState(false);
-	const { mutateAsync: removeModFromInstallation, isPending: removePending } =
-		useMutation({
-			mutationFn: (variables: {
-				path: string;
-				modpath: string;
-				updateMod: ModUpdate & { modid: string };
-			}) =>
-				invoke("remove_mod_from_installation", {
-					params: { modpath: variables.modpath, path: variables.path },
-				}),
-			onError: (error, variables) => {
-				toast.error(
-					`Error removing ${name} from ${installation.name}: ${error.message}`,
-					{
-						id: `mod-remove-${variables.path}-${variables.modpath}`,
-					},
-				);
-			},
-			onSuccess: async (_d, v) => {
-				if (installation) {
-					await addModToInstallation({
-						emitevent,
-						installation,
-						mod: v.updateMod,
-					});
-				}
-			},
-		});
+  const pathHash = hashPath(modsDirectory);
+  const emitevent = `mod-updates-${pathHash}-progress`;
+  const label = modsDirectory.split(/[/\\]/).pop() || modsDirectory;
+  const queryClient = useQueryClient();
+  const [wantsToUpdate, setWantsToUpdate] = useState(false);
 
-	const { mutateAsync: addModToInstallation, isPending } =
-		useAddModUpdateToInstallation({
-			onError: (error, variables) => {
-				toast.error(
-					`Error updating mod in ${variables.installation.name}: ${error.message}`,
-					{
-						id: `mod-update-${variables.installation.id}-${variables.mod.modidstr}`,
-					},
-				);
-			},
-		});
+  const { mutateAsync: removeModFromInstallation, isPending: removePending } = useMutation({
+    mutationFn: (variables: {
+      path: string;
+      modpath: string;
+      updateMod: ModUpdate & { modid: string };
+    }) =>
+      invoke("remove_mod_from_installation", {
+        params: { modpath: variables.modpath, path: variables.path },
+      }),
+    onError: (error, variables) => {
+      toast.error(
+        `Error removing ${variables.updateMod.filename} from ${label}: ${error.message}`,
+        {
+          id: `mod-remove-${variables.path}-${variables.modpath}`,
+        },
+      );
+    },
+    onSuccess: async (_d, v) => {
+      if (modsDirectory) {
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: installedModsQueryKey(modsDirectory) }),
+          queryClient.invalidateQueries({ queryKey: modUpdatesQueryKey(modsDirectory) }),
+        ]);
+        await addModToInstallation({
+          emitevent,
+          modsDirectory,
+          mod: v.updateMod,
+        });
+      }
+    },
+  });
 
-	const handleUpdateAll = async () => {
-		if (wantsToUpdate) {
-			// Trigger update process for all installed mods with updates
-			toast.loading("Downloading mod updates...", {
-				id: `mod-updates-${installation.id}`,
-			});
-			for (const [modid, updateMod] of Object.entries(updates.updates)) {
-				const isInstalled = installedMods?.find(
-					(instMod) =>
-						instMod.modid === Number(modid) ||
-						instMod.modid.toString() === updateMod.modidstr,
-				);
-				if (!isInstalled) continue;
-				toast.loading(`Updating ${isInstalled.name}...`, {
-					id: `mod-updates-${installation.id}`,
-				});
-				await removeModFromInstallation({
-					modpath: isInstalled.path,
-					path: installation.path,
-					updateMod: {
-						...updateMod,
-						modid: modid,
-					},
-				});
-			}
-			await queryClient.invalidateQueries({
-				queryKey: installedModsQueryKey(installation.path),
-			});
-			await queryClient.invalidateQueries({
-				queryKey: modUpdatesQueryKey(installation.id),
-			});
-			toast.success(`All mod updates completed for ${installation.name}.`, {
-				id: `mod-updates-${installation.id}`,
-			});
-			// Reset the wantsToUpdate state
-			setWantsToUpdate(false);
-		} else {
-			setWantsToUpdate(true);
-		}
-	};
+  const { mutateAsync: addModToInstallation, isPending } = useAddModUpdateToInstallation({
+    onError: (error, variables) => {
+      toast.error(`Error updating mod in ${label}: ${error.message}`, {
+        id: `mod-update-${pathHash}-${variables.mod.modidstr}`,
+      });
+    },
+  });
 
-	return (
-		<Button
-			disabled={
-				!updates ||
-				Object.keys(updates.updates).length === 0 ||
-				isPending ||
-				removePending
-			}
-			onClick={() => updates && handleUpdateAll()}
-			variant={wantsToUpdate ? "destructive" : "outline"}
-		>
-			{wantsToUpdate ? "Yes, really" : "Update All"}
-		</Button>
-	);
+  const handleUpdateAll = async () => {
+    if (wantsToUpdate) {
+      // Trigger update process for all installed mods with updates
+      toast.loading("Downloading mod updates...", {
+        id: `mod-updates-${pathHash}`,
+      });
+      // Build a lookup Map to avoid O(n*m) find() inside the loop
+      const installedModsByModId = new Map<string | number, (typeof installedMods)[number]>();
+      for (const m of installedMods ?? []) {
+        installedModsByModId.set(m.modid, m);
+        installedModsByModId.set(m.modid.toString(), m);
+      }
+      await Promise.all([
+        ...Object.entries(updates.updates).map(async ([modid, updateMod]) => {
+          const isInstalled =
+            installedModsByModId.get(Number(modid)) ?? installedModsByModId.get(updateMod.modidstr);
+          if (!isInstalled) return;
+          toast.loading(`Updating ${isInstalled.name}...`, {
+            id: `mod-updates-${pathHash}`,
+          });
+          await removeModFromInstallation({
+            modpath: isInstalled.path,
+            path: modsDirectory,
+            updateMod: {
+              ...updateMod,
+              modid: modid,
+            },
+          });
+        }),
+        queryClient.invalidateQueries({
+          queryKey: installedModsQueryKey(modsDirectory),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: modUpdatesQueryKey(modsDirectory),
+        }),
+      ]);
+      toast.success(`All mod updates completed for ${label}.`, {
+        id: `mod-updates-${pathHash}`,
+      });
+      // Reset the wantsToUpdate state
+      setWantsToUpdate(false);
+    } else {
+      setWantsToUpdate(true);
+    }
+  };
+
+  return (
+    <Button
+      disabled={!updates || Object.keys(updates.updates).length === 0 || isPending || removePending}
+      onClick={() => updates && handleUpdateAll()}
+      variant={wantsToUpdate ? "destructive" : "outline"}
+      size="lg"
+    >
+      {wantsToUpdate ? "Yes, really" : "Update All"}
+    </Button>
+  );
 };

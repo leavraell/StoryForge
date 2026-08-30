@@ -1,7 +1,6 @@
-
 <p align="center">
    <a href="https://getstoryforge.app/">
-      <img src="public/StoryForge.png" alt="Story Forge" />
+      <img src="/public/StoryForge.png" style="height: 200px;" alt="Story Forge" />
    </a>
    <br />
    <br />
@@ -40,6 +39,13 @@
 - **Minimal & Fast**: Built with Tauri (Rust) for a lightweight, secure, and fast experience.
 - **Beautiful UI**: Powered by Vite + React for a snappy, modern interface.
 - **Updater**: Install once, update forever - with the built-in auto updater.
+
+> [!WARNING]
+> **macOS Users:** Story Forge is not notarized yet, so macOS Gatekeeper may block it from launching. After installing, run the following in your terminal to allow the app:
+>
+> ```sh
+> sudo xattr -rd com.apple.quarantine /Applications/Story\ Forge.app
+> ```
 
 ---
 
